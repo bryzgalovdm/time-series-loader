@@ -1,0 +1,14 @@
+# requirements-dev.txt
+-r requirements.txt  # Include production dependencies
+
+# Development-only dependencies
+ipykernel
+ipython
+jupyter
+pytest
+pytest-mock
+black
+isort
+flake8
+pep8-naming
+pre-commit

@@ -1,0 +1,23 @@
+repos:
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2  # Use the latest stable version or pin a specific version
+    hooks:
+      - id: isort
+        types: [python]
+        stages: [pre-commit]
+
+  - repo: https://github.com/psf/black
+    rev: 24.10.0  # Use the latest stable version or pin a specific version
+    hooks:
+      - id: black
+        types: [python]
+        stages: [pre-commit]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.0  # Pin the version you need
+    hooks:
+      - id: flake8
+        additional_dependencies: [pep8-naming==0.14.1]  # Example of additional dependencies
+        args: ["--max-line-length=88"]  # Customize flake8 configuration
+        types: [python]
+        stages: [pre-commit]

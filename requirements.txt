@@ -1,0 +1,5 @@
+# requirements.txt
+matplotlib
+scikit-learn
+numpy
+streamlit
