@@ -21,7 +21,7 @@ from time_series_loader.error_handling import (
 )
 from time_series_loader.file_metadata_parser import TimeMetadataExtractor
 from time_series_loader.load_file import FileDataFrame, FileMetadata
-from time_series_loader.ts_config import TimeSeriesConfig
+from time_series_loader.ts_config import LoadingConfig, TimeSeriesConfig
 
 
 def get_formatted_path(path):
@@ -846,7 +846,10 @@ class TestDataFrameLoadingAndConcatenation:
 
     @pytest.fixture
     def file_dataframe(self):
-        return FileDataFrame(base_path="/path/to/data")
+        return FileDataFrame(
+            base_path="/path/to/data",
+            loading_config=LoadingConfig(timestamp_column="Type1 SubType - Time"),
+        )
 
     @pytest.fixture
     def loaded_dataframe(self, file_dataframe, file_metadata_list):

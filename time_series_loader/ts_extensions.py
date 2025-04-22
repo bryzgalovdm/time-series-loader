@@ -32,9 +32,17 @@ class DataTransformer(ABC):
 class DefaultDataTransformer(DataTransformer):
     """Default implementation that adds metadata columns."""
 
-    def transform(self, df: pd.DataFrame, metadata: FileMetadata) -> pd.DataFrame:
+    def transform(
+        self, df: pd.DataFrame, timestamp_column: str, metadata: FileMetadata
+    ) -> pd.DataFrame:
         """Add standard metadata columns to the DataFrame."""
         df = df.copy()
+
+        # Transform all columns to numeric except timestamp column
+        for col in df.columns:
+            if col != timestamp_column:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
         df["source_file"] = str(metadata.filepath)
         df["file_start_time"] = metadata.start_time
         df["file_end_time"] = metadata.end_time

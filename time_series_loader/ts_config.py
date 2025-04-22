@@ -20,6 +20,8 @@ class LoadingConfig:
     """Configuration for data loading."""
 
     delimiter: str = ";"
+    decimal: str = "."
+    timestamp_column: str = None
     time_format: str = "%d/%m/%Y %H:%M"
     encoding: str = "utf-8"
     parse_dates: bool = True

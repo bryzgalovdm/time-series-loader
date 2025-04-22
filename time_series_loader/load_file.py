@@ -8,8 +8,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import dateparser
 import numpy as np
 import pandas as pd
+from dateutil.parser import ParserError
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 from .error_handling import (
@@ -160,9 +162,11 @@ class FileDataFrame:
 
         # Console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.WARNING)
+        console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
+
+        self.logger.debug("Logging initialized with console handler of level INFO")
 
         # File handler if log_file is provided
         if log_file:
@@ -170,6 +174,9 @@ class FileDataFrame:
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
+            self.logger.debug(
+                f"Logging initialized with file handler of level DEBUG to {log_file}"
+            )
 
     def _add_error(self, error: ProcessingError) -> None:
         """
@@ -1548,6 +1555,7 @@ class FileDataFrame:
                         BytesIO(self.streamlit_files.getvalue()),
                         delimiter=self.loading_config.delimiter,
                         encoding=self.loading_config.encoding,
+                        decimal=self.loading_config.decimal,
                     )
                 # Handle multiple files case
                 else:
@@ -1565,6 +1573,7 @@ class FileDataFrame:
                                 BytesIO(uploaded_file.getvalue()),
                                 delimiter=self.loading_config.delimiter,
                                 encoding=self.loading_config.encoding,
+                                decimal=self.loading_config.decimal,
                             )
                             break
                     else:
@@ -1578,6 +1587,7 @@ class FileDataFrame:
                     metadata.filepath,
                     delimiter=self.loading_config.delimiter,
                     encoding=self.loading_config.encoding,
+                    decimal=self.loading_config.decimal,
                 )
             else:
                 raise DataLoadingError(
@@ -1589,12 +1599,9 @@ class FileDataFrame:
             self._validate_dataframe_structure(df, metadata.filepath)
 
             # Apply custom data transformation
-            df = self.data_transformer.transform(df, metadata)
-
-            # Add metadata columns
-            df["source_file"] = str(metadata.filepath)
-            df["file_start_time"] = metadata.start_time
-            df["file_end_time"] = metadata.end_time
+            df = self.data_transformer.transform(
+                df, self.loading_config.timestamp_column, metadata
+            )
 
             return df
 
@@ -1922,9 +1929,102 @@ class FileDataFrame:
                 )
         return self.concat_metadata
 
+    def _parse_dates_with_dateparser(self, date_series, settings=None):
+        # TODO: Optimize: using dateparser slows down things with big files
+        """
+        Parse dates using dateparser with specified settings
+
+        Args:
+            date_series: pandas Series containing date strings
+            settings: dictionary of settings for dateparser
+
+        Returns:
+            pandas Series with parsed datetime objects
+        """
+        if settings is None:
+            settings = {"DATE_ORDER": "DMY"}  # Default to day-month-year format
+
+        def parse_date(date_str):
+            if pd.isna(date_str):
+                return pd.NaT
+            try:
+                return dateparser.parse(str(date_str), settings=settings)
+            except (ParserError, TypeError, ValueError):
+                return pd.NaT
+
+        return date_series.apply(parse_date)
+
+    def _transform_time_column(self, time_column=None, date_order="DMY"):
+        """
+        Validate and convert time column to datetime
+        It searches if there are any columns that are already datetime if no
+        time column is given.
+        Then it uses dateparser column to convert it datetime
+
+        Args:
+            time_column: Name of the column containing timestamps
+            date_order: Order of date components (DMY, MDY, YMD)
+        """
+        # Find datetime column if not specified
+        if time_column is None:
+            datetime_cols = [
+                col
+                for col in self.dataframe.columns
+                if pd.api.types.is_datetime64_any_dtype(self.dataframe[col])
+            ]
+            if not datetime_cols:
+                raise TimeValidationError(
+                    invalid_time=None, message="No datetime column found in DataFrame"
+                )
+            time_column = datetime_cols[0]
+
+        # Ensure column is datetime type
+        if not pd.api.types.is_datetime64_any_dtype(self.dataframe[time_column]):
+            try:
+                # Configure dateparser settings based on your requirements
+                settings = {
+                    "DATE_ORDER": date_order,  # 'DMY', 'MDY', or 'YMD'
+                    "STRICT_PARSING": False,
+                    "RETURN_AS_TIMEZONE_AWARE": False,
+                }
+
+                try:
+                    self.logger.info(
+                        "Transforming timestamp column using "
+                        f"{self.loading_config.time_format} format"
+                    )
+                    self.dataframe[time_column] = pd.to_datetime(
+                        self.dataframe[time_column],
+                        format=self.loading_config.time_format,
+                        errors="raise",
+                    )
+                except Exception:
+                    self.logger.warning(
+                        f"Failed to parse {time_column} with pd.to_datetime,"
+                        "wrong date format, trying dateparser"
+                    )
+                    # Parse dates using dateparser
+                    parsed_dates = self._parse_dates_with_dateparser(
+                        self.dataframe[time_column], settings=settings
+                    )
+
+                    # Check if parsing was successful
+                    if parsed_dates.isna().all():
+                        raise ValueError("Could not parse all dates in the column")
+
+                    # Assign parsed dates back to the dataframe
+                    self.dataframe[time_column] = parsed_dates
+
+            except Exception as e:
+                raise TimeValidationError(
+                    invalid_time=time_column,
+                    message=f"Could not convert {time_column} to datetime: {str(e)}",
+                )
+
     def analyze_time_series_continuity(
         self,
         time_column: str = None,
+        date_order: str = "DMY",
         expected_frequency: str = None,
         min_gap_size: str = "1min",
     ) -> Dict:
@@ -1933,6 +2033,8 @@ class FileDataFrame:
 
         Args:
             time_column: Name of the datetime column to analyze. If None, tries to auto-detect.
+            date_order: Order of date and month in the timestamps. Default is 'DMY', another
+                              option is 'MDY' or 'YMD'.
             expected_frequency: Expected frequency of data ('1s', '1min', '1H', etc.).
                               If None, tries to infer from data.
             min_gap_size: Minimum gap size to report (default '1min' = 1 minute)
@@ -1950,30 +2052,10 @@ class FileDataFrame:
                 error_details="DataFrame not loaded. Run load_and_concatenate first.",
             )
 
-        # Find datetime column if not specified
         if time_column is None:
-            datetime_cols = [
-                col
-                for col in self.dataframe.columns
-                if pd.api.types.is_datetime64_any_dtype(self.dataframe[col])
-            ]
-            if not datetime_cols:
-                raise TimeValidationError(
-                    invalid_time=None, message="No datetime column found in DataFrame"
-                )
-            time_column = datetime_cols[0]
-
-        # Ensure column is datetime type
-        if not pd.api.types.is_datetime64_any_dtype(self.dataframe[time_column]):
-            try:
-                self.dataframe[time_column] = pd.to_datetime(
-                    self.dataframe[time_column], format="%d/%m/%Y %H:%M"
-                )
-            except Exception as e:
-                raise TimeValidationError(
-                    invalid_time=time_column,
-                    message=f"Could not convert {time_column} to datetime: {str(e)}",
-                )
+            time_column = self.loading_config.timestamp_column
+        # Find datetime column if not specified
+        self._transform_time_column(time_column=time_column, date_order=date_order)
 
         # Sort by time column
         df = self.dataframe.sort_values(time_column).copy()
@@ -2039,6 +2121,7 @@ class FileDataFrame:
         }
 
         self.time_series_analysis = report
+        self.logger.info("Time series continuity analysis report created")
         return report
 
     @staticmethod
@@ -2158,6 +2241,7 @@ class FileDataFrame:
     def resample_time_series(
         self,
         time_column: str = None,
+        date_order: str = "DMY",
         frequency: str = None,
         method_resample: str = None,
         method_fill: str = None,
@@ -2170,6 +2254,8 @@ class FileDataFrame:
 
         Args:
             time_column: Name of the datetime column. If None, uses the one from analysis.
+            date_order: Order of date and month in the timestamps. Default is 'DMY', another
+                        option is 'MDY' or 'YMD'.
             frequency: Target frequency for resampling. If None, uses inferred frequency.
             method_resample: Method for resampling ('mean', 'sum', 'last')
             method_fill: Method for filling gaps ('ffill', 'bfill', 'interpolate', None)
@@ -2187,7 +2273,7 @@ class FileDataFrame:
         """
         # Ensure we have time series analysis
         if not hasattr(self, "time_series_analysis"):
-            self.analyze_time_series_continuity(time_column)
+            self.analyze_time_series_continuity(time_column, date_order=date_order)
 
         time_column = time_column or self.time_series_analysis["time_column"]
         frequency = frequency or self.time_series_analysis["inferred_frequency"]
@@ -2247,14 +2333,25 @@ class FileDataFrame:
             resampled = df.reindex(full_range)
         else:
             resampled = self.resample_with_dates(df, full_range, method=method_resample)
+        self.logger.info(
+            f"Resampled time series data with frequency {frequency} and method {method_resample}"
+        )
 
         # Fill gaps according to specified method
-        if method_fill == "ffill":
-            resampled.fillna(method="ffill", limit=limit, inplace=True)
-        elif method_fill == "bfill":
-            resampled.fillna(method="bfill", limit=limit, inplace=True)
-        elif method_fill == "interpolate":
-            resampled.interpolate(method="time", limit=limit, inplace=True)
+        try:
+            if method_fill == "ffill":
+                resampled.fillna(method="ffill", limit=limit, inplace=True)
+            elif method_fill == "bfill":
+                resampled.fillna(method="bfill", limit=limit, inplace=True)
+            elif method_fill == "interpolate":
+                resampled.interpolate(method="time", limit=limit, inplace=True)
+        except Exception:
+            error_msg = f"Error filling gaps with method {method_fill}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if method_fill is not None:
+            self.logger.info(f"Time series filled using method: {method_fill}")
 
         # Reset index to make time column available again
         resampled.reset_index(inplace=True)
