@@ -1,5 +1,5 @@
 # requirements.txt
-matplotlib
-scikit-learn
+dateparser
 numpy
+pandas
 streamlit
